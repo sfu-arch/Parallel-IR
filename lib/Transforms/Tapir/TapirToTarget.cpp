@@ -13,17 +13,16 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Analysis/AssumptionCache.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Verifier.h"
-#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Program.h"
 #include "llvm/Transforms/Tapir.h"
 #include "llvm/Transforms/Tapir/LoweringUtils.h"
-#include "llvm/Support/Program.h"
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Bitcode/BitcodeWriter.h"
-
+#include "llvm/Transforms/Utils/Cloning.h"
 
 #define DEBUG_TYPE "tapir2target"
 
@@ -35,23 +34,18 @@ using llvm::sys::findProgramByName;
 static cl::opt<TapirTargetType> ClTapirTarget(
     "tapir-target", cl::desc("Target runtime for Tapir"),
     cl::init(TapirTargetType::Cilk),
-    cl::values(clEnumValN(TapirTargetType::None,
-                          "none", "None"),
-               clEnumValN(TapirTargetType::Serial,
-                          "serial", "Serial code"),
-               clEnumValN(TapirTargetType::Cilk,
-                          "cilk", "Cilk Plus"),
-               clEnumValN(TapirTargetType::OpenMP,
-                          "openmp", "OpenMP"),
-               clEnumValN(TapirTargetType::CilkR,
-                          "cilkr", "CilkR")));
+    cl::values(clEnumValN(TapirTargetType::None, "none", "None"),
+               clEnumValN(TapirTargetType::Serial, "serial", "Serial code"),
+               clEnumValN(TapirTargetType::Cilk, "cilk", "Cilk Plus"),
+               clEnumValN(TapirTargetType::OpenMP, "openmp", "OpenMP"),
+               clEnumValN(TapirTargetType::CilkR, "cilkr", "CilkR")));
 
 namespace {
 
 struct LowerTapirToTarget : public ModulePass {
   static char ID; // Pass identification, replacement for typeid
-  TapirTarget* tapirTarget;
-  explicit LowerTapirToTarget(TapirTarget* tapirTarget = nullptr)
+  TapirTarget *tapirTarget;
+  explicit LowerTapirToTarget(TapirTarget *tapirTarget = nullptr)
       : ModulePass(ID), tapirTarget(tapirTarget) {
     if (!this->tapirTarget)
       this->tapirTarget = getTapirTargetFromType(ClTapirTarget);
@@ -69,13 +63,14 @@ struct LowerTapirToTarget : public ModulePass {
     AU.addRequired<AssumptionCacheTracker>();
     AU.addRequired<DominatorTreeWrapperPass>();
   }
+
 private:
   ValueToValueMapTy DetachCtxToStackFrame;
   bool unifyReturns(Function &F);
   SmallVectorImpl<Function *> *processFunction(Function &F, DominatorTree &DT,
                                                AssumptionCache &AC);
 };
-}  // End of anonymous namespace
+} // End of anonymous namespace
 
 char LowerTapirToTarget::ID = 0;
 INITIALIZE_PASS_BEGIN(LowerTapirToTarget, "tapir2target",
@@ -84,7 +79,6 @@ INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(LowerTapirToTarget, "tapir2target",
                     "Lower Tapir to Target ABI", false, false)
-
 
 bool LowerTapirToTarget::unifyReturns(Function &F) {
   SmallVector<BasicBlock *, 4> ReturningBlocks;
@@ -96,8 +90,8 @@ bool LowerTapirToTarget::unifyReturns(Function &F) {
   if (ReturningBlocks.size() == 1)
     return false;
 
-  BasicBlock *NewRetBlock = BasicBlock::Create(F.getContext(),
-                                               "UnifiedReturnBlock", &F);
+  BasicBlock *NewRetBlock =
+      BasicBlock::Create(F.getContext(), "UnifiedReturnBlock", &F);
   PHINode *PN = nullptr;
   if (F.getReturnType()->isVoidTy()) {
     ReturnInst::Create(F.getContext(), nullptr, NewRetBlock);
@@ -118,14 +112,15 @@ bool LowerTapirToTarget::unifyReturns(Function &F) {
     if (PN)
       PN->addIncoming(BB->getTerminator()->getOperand(0), BB);
 
-    BB->getInstList().pop_back();  // Remove the return insn
+    BB->getInstList().pop_back(); // Remove the return insn
     BranchInst::Create(NewRetBlock, BB);
   }
   return true;
 }
 
-SmallVectorImpl<Function *> *LowerTapirToTarget::processFunction(
-    Function &F, DominatorTree &DT, AssumptionCache &AC) {
+SmallVectorImpl<Function *> *
+LowerTapirToTarget::processFunction(Function &F, DominatorTree &DT,
+                                    AssumptionCache &AC) {
   if (unifyReturns(F))
     DT.recalculate(F);
 
@@ -193,8 +188,8 @@ SmallVectorImpl<Function *> *LowerTapirToTarget::processFunction(
     DetachInst *DI = Detaches.pop_back_val();
     // Lower a detach instruction, and collect the helper function generated in
     // this process for executing the detached task.
-    Function *Helper = tapirTarget->createDetach(*DI, DetachCtxToStackFrame,
-                                                 DT, AC);
+    Function *Helper =
+        tapirTarget->createDetach(*DI, DetachCtxToStackFrame, DT, AC);
     NewHelpers->push_back(Helper);
     Changed = true;
   }
@@ -206,7 +201,8 @@ SmallVectorImpl<Function *> *LowerTapirToTarget::processFunction(
     Changed = true;
   }
 
-  if (!Changed) return NewHelpers;
+  if (!Changed)
+    return NewHelpers;
 
   if (verifyFunction(F, &errs()))
     llvm_unreachable("Tapir lowering produced bad IR!");
@@ -223,17 +219,18 @@ bool LowerTapirToTarget::runOnModule(Module &M) {
   if (skipModule(M))
     return false;
 
-  //Storing module before lowering down to Cilk
-  std::error_code errc;
-  std::string bitcode_name = M.getName().str() + ".dandelion.bc";
-  llvm::raw_fd_ostream out(bitcode_name, errc, sys::fs::F_None);
-  if (errc) {
-      report_fatal_error("error saving llvm module to '" 
-              + bitcode_name+ "': \n"+ errc.message());
-            
+  // Storing module before lowering down to Cilk
+  const char *s = getenv("DANDELION_EXTRACT");
+  if (strcmp(s, "ON") == 0) {
+    std::error_code errc;
+    std::string bitcode_name = M.getName().str() + ".dandelion.bc";
+    llvm::raw_fd_ostream out(bitcode_name, errc, sys::fs::F_None);
+    if (errc) {
+      report_fatal_error("error saving llvm module to '" + bitcode_name +
+                         "': \n" + errc.message());
+    }
+    llvm::WriteBitcodeToFile(&M, out);
   }
-  llvm::WriteBitcodeToFile(&M, out);
-
 
   // Add functions that detach to the work list.
   SmallVector<Function *, 4> WorkList;
@@ -265,7 +262,7 @@ bool LowerTapirToTarget::runOnModule(Module &M) {
 // createLowerTapirToTargetPass - Provide an entry point to create this pass.
 //
 namespace llvm {
-ModulePass *createLowerTapirToTargetPass(TapirTarget* tapirTarget) {
+ModulePass *createLowerTapirToTargetPass(TapirTarget *tapirTarget) {
   return new LowerTapirToTarget(tapirTarget);
 }
-}
+} // namespace llvm
