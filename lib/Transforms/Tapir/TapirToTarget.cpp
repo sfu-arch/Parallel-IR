@@ -20,10 +20,17 @@
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Tapir.h"
 #include "llvm/Transforms/Tapir/LoweringUtils.h"
+#include "llvm/Support/Program.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
+
 
 #define DEBUG_TYPE "tapir2target"
 
 using namespace llvm;
+
+using llvm::sys::ExecuteAndWait;
+using llvm::sys::findProgramByName;
 
 static cl::opt<TapirTargetType> ClTapirTarget(
     "tapir-target", cl::desc("Target runtime for Tapir"),
@@ -212,8 +219,21 @@ SmallVectorImpl<Function *> *LowerTapirToTarget::processFunction(
 }
 
 bool LowerTapirToTarget::runOnModule(Module &M) {
+
   if (skipModule(M))
     return false;
+
+  //Storing module before lowering down to Cilk
+  std::error_code errc;
+  std::string bitcode_name = M.getName().str() + ".dandelion.bc";
+  llvm::raw_fd_ostream out(bitcode_name, errc, sys::fs::F_None);
+  if (errc) {
+      report_fatal_error("error saving llvm module to '" 
+              + bitcode_name+ "': \n"+ errc.message());
+            
+  }
+  llvm::WriteBitcodeToFile(&M, out);
+
 
   // Add functions that detach to the work list.
   SmallVector<Function *, 4> WorkList;
